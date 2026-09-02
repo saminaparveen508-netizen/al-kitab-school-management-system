@@ -1,0 +1,273 @@
+// ==========================================================
+// Al-Kitab Public Elementary School - Jhang
+// Prisma Schema (PostgreSQL)
+// ==========================================================
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------
+// ENUMS
+// ----------------------------------------------------------
+
+enum Role {
+  ADMIN
+  TEACHER
+  PARENT
+  STUDENT
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum StaffType {
+  TEACHING
+  NON_TEACHING
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LEAVE
+  LATE
+}
+
+// ----------------------------------------------------------
+// CORE AUTH — every login (admin/teacher/parent/student) is a User
+// ----------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  password      String // hashed with bcrypt
+  role          Role
+  phone         String?
+  avatarUrl     String?
+  isActive      Boolean   @default(true)
+  emailVerified DateTime?
+
+  createdAt DateTime @updatedAt @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Optional 1-1 links depending on role
+  staffProfile   Staff?
+  parentProfile  Parent?
+  studentProfile Student?
+
+  // NextAuth relations (only needed if using DB sessions/adapter)
+  accounts Account[]
+  sessions Session[]
+
+  @@map("users")
+}
+
+// NextAuth required models (kept even though we mainly use JWT strategy,
+// so the adapter / future OAuth providers work without extra migration)
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ----------------------------------------------------------
+// STAFF (Admins + Teachers + Non-teaching staff)
+// ----------------------------------------------------------
+
+model Staff {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeCode String    @unique
+  staffType    StaffType @default(TEACHING)
+  designation  String? // e.g. "Class Teacher", "Principal", "Peon"
+  qualification String?
+  gender       Gender?
+  cnic         String?   @unique
+  address      String?
+  joiningDate  DateTime?
+  salary       Decimal?  @db.Decimal(10, 2)
+
+  // A teacher can be the class-in-charge of many sections
+  sectionsInCharge Section[]     @relation("SectionTeacher")
+  subjectsTaught   TeacherSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("staff")
+}
+
+// ----------------------------------------------------------
+// PARENTS / GUARDIANS
+// ----------------------------------------------------------
+
+model Parent {
+  id           String  @id @default(cuid())
+  userId       String  @unique
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fatherName   String?
+  motherName   String?
+  cnic         String? @unique
+  occupation   String?
+  address      String?
+
+  children Student[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("parents")
+}
+
+// ----------------------------------------------------------
+// CLASSES & SECTIONS (Pre-Nursery ... 8th)
+// ----------------------------------------------------------
+
+model Class {
+  id        String    @id @default(cuid())
+  name      String    @unique // "Pre-Nursery", "Nursery", "Class 1" ... "Class 8"
+  order     Int       @unique // 0,1,2...10  (used for sorting)
+  sections  Section[]
+  subjects  Subject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("classes")
+}
+
+model Section {
+  id       String  @id @default(cuid())
+  name     String // "A", "B", "C"
+  classId  String
+  class    Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  classTeacherId String?
+  classTeacher   Staff?  @relation("SectionTeacher", fields: [classTeacherId], references: [id])
+
+  capacity Int? @default(40)
+
+  students Student[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([classId, name])
+  @@map("sections")
+}
+
+// ----------------------------------------------------------
+// SUBJECTS
+// ----------------------------------------------------------
+
+model Subject {
+  id      String @id @default(cuid())
+  name    String // "English", "Urdu", "Mathematics", "Islamiyat"...
+  code    String @unique
+  classId String
+  class   Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  teachers TeacherSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([classId, name])
+  @@map("subjects")
+}
+
+// Many-to-many: which teacher teaches which subject
+model TeacherSubject {
+  id        String  @id @default(cuid())
+  staffId   String
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, subjectId])
+  @@map("teacher_subjects")
+}
+
+// ----------------------------------------------------------
+// STUDENTS
+// ----------------------------------------------------------
+
+model Student {
+  id             String    @id @default(cuid())
+  fullName       String // Child's name — stored here directly since very young
+  // students (Pre-Nursery, Nursery) usually don't have a login account.
+  userId         String?   @unique // student login is optional for very young classes
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  rollNumber     String    @unique
+  gender         Gender?
+  dateOfBirth    DateTime?
+  bFormOrCnic    String? // Child B-Form / CNIC number (Pakistan)
+  address        String?
+  admissionDate  DateTime  @default(now())
+
+  parentId  String?
+  parent    Parent?  @relation(fields: [parentId], references: [id])
+
+  sectionId String?
+  section   Section? @relation(fields: [sectionId], references: [id])
+
+  attendance Attendance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("students")
+}
+
+// ----------------------------------------------------------
+// ATTENDANCE (bonus table, useful once dashboards need real data)
+// ----------------------------------------------------------
+
+model Attendance {
+  id        String           @id @default(cuid())
+  studentId String
+  student   Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  date      DateTime         @db.Date
+  status    AttendanceStatus @default(PRESENT)
+  remarks   String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, date])
+  @@map("attendance")
+}
